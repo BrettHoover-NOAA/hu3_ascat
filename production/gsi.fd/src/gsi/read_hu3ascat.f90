@@ -148,10 +148,13 @@ subroutine read_hu3ascat(nread,ndata,nodata,infile,obstype,lunout,gstime,twind,s
   real(r_kind),dimension(4):: lkcs_vec
   real(r_kind),dimension(4):: uob_vec
   real(r_kind),dimension(4):: vob_vec
+  real(r_kind) umd, vmd ! "model" u- and v-wind, from BUFR file
+  real(r_kind) uopp, vopp ! "opposing" u- and v-wind
+  real(r_kind) vdiffopt, vdiffopp ! vector-difference w.r.t. "model"
 
   real(r_double),dimension(8):: hdrdat
   real(r_double),dimension(2):: satqc
-  real(r_double),dimension(3):: obsdat
+  real(r_double),dimension(5):: obsdat
   real(r_double),dimension(3,4):: wnddat
   real(r_double),dimension(1,1):: r_prvstg,r_sprvstg
   real(r_kind),allocatable,dimension(:):: presl_thin
@@ -164,7 +167,7 @@ subroutine read_hu3ascat(nread,ndata,nodata,infile,obstype,lunout,gstime,twind,s
 
 !******** Modify below from the bufrtable: 
   data hdrtr /'SAID CLATH CLONH YEAR MNTH DAYS HOUR MINU'/ 
-  data obstr/'WVCQ NWVA ISWV'/ 
+  data obstr/'WVCQ NWVA ISWV MWS10 MWD10'/ 
   data wndstr/'WS10 WD10 LKCS'/ 
   
   
@@ -397,6 +400,8 @@ write(6,*) ' READ_HU3ASCAT: entering routine'
            ee=r110
            qifn=r110
            qify=r110
+           umd=bmiss
+           vmd=bmiss
            uob_1=bmiss
            vob_1=bmiss
            uob_2=bmiss
@@ -412,7 +417,7 @@ write(6,*) ' READ_HU3ASCAT: entering routine'
  
 ! Extract type, date, and location information
            call ufbint(lunin,hdrdat,8,1,iret,hdrtr) 
-           call ufbint(lunin,obsdat,3,1,iret,obstr)
+           call ufbint(lunin,obsdat,5,1,iret,obstr)
            call ufbrep(lunin,wnddat,3,4,iret,wndstr)
 
 
@@ -504,7 +509,10 @@ write(6,*) ' READ_HU3ASCAT: entering routine'
            qc1=obsdat(1) ! WVCQ: wind vector cell quality
            qc2=obsdat(2) ! NWVA: number of wind vector ambiguities
            qc3=obsdat(3) ! ISWV: index of selected wind vector
-
+           ! Convert "model" 10m speed/dir to u-, v-wind
+           umd=-obsdat(4)*sin(obsdat(5)*deg2rad)
+           vmd=-obsdat(4)*cos(obsdat(5)*deg2rad)
+           ! Convert ASCAT ambiguity speed/dir to u-, v-wind
            uob_1=-wnddat(1,1)*sin(wnddat(2,1)*deg2rad)
            vob_1=-wnddat(1,1)*cos(wnddat(2,1)*deg2rad)
            uob_2=-wnddat(1,2)*sin(wnddat(2,2)*deg2rad)
@@ -522,6 +530,7 @@ write(6,*) ' READ_HU3ASCAT: entering routine'
            vob_vec(2)=vob_2
            vob_vec(3)=vob_3
            vob_vec(4)=vob_4
+           ! load likelihood values into variables
            lkcs_1=wnddat(3,1)
            lkcs_2=wnddat(3,2)
            lkcs_3=wnddat(3,3)
@@ -540,12 +549,26 @@ write(6,*) ' READ_HU3ASCAT: entering routine'
            lkcs_vec(4)=lkcs_4
            ! select optimal wind vector based on maxloc(lkcs_vec)
            opt_idx=maxloc(lkcs_vec)
-           write(6,*) 'BTH: abs(wnddat),lkcs=',abs(wnddat(1,opt_idx(1))),lkcs_vec(opt_idx(1))
+           ! ambiguity check: If a wind pointed opposite to the optimal
+           ! wind would be a better fit to the model wind, we should
+           ! anticipate that there is another wind ambiguity that may
+           ! have a marginally lower likelihood but points in the right
+           ! direction and should be selected as the optimal wind.
+           uopp=-uob_vec(opt_idx(1)) ! opposing u-wind
+           vopp=-vob_vec(opt_idx(1)) ! opposing v-wind
+           vdiffopt=sqrt((uob_vec(opt_idx(1))-umd)**2.+(vob_vec(opt_idx(1))-vmd)**2.)
+           vdiffopp=sqrt((uopp-umd)**2.+(vopp-vmd)**2.)
+           if (vdiffopp<vdiffopt) then ! ambiguity check-fail
+               ! set likelihood of optimal to -bmiss
+               lkcs_vec(opt_idx(1)) = -bmiss
+               ! find next most likely wind ambiguity and set as optimal
+               opt_idx=maxloc(lkcs_vec)
+           end if
            ! insert wind speed threshold criteria from above
            if(abs(wnddat(1,opt_idx(1))) >= r100) cycle loop_readsb
-           ! reject any optimal wind vector with likelihood > 1 or less than 0
-           if(lkcs_vec(opt_idx(1))>1.) cycle loop_readsb
-           if(lkcs_vec(opt_idx(1))<0.) cycle loop_readsb
+           ! reject any optimal wind vector with likelihood
+           ! less than -110 (e.g. obviously a missing-value)
+           if(lkcs_vec(opt_idx(1))<-r110) cycle loop_readsb
            ! define wind vector from optimal wnddat index
            uob=uob_vec(opt_idx(1))
            vob=vob_vec(opt_idx(1))
