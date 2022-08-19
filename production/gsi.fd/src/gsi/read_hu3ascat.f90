@@ -117,7 +117,7 @@ subroutine read_hu3ascat(nread,ndata,nodata,infile,obstype,lunout,gstime,twind,s
   integer(i_kind) ntest,nvtest
   integer(i_kind) kl,k1,k2
   integer(i_kind) nmsg                ! message index
-  integer(i_kind) qc1,qc2,qc3,ierr
+  integer(i_kind) qc1,ierr
   
   
  
@@ -144,13 +144,11 @@ subroutine read_hu3ascat(nread,ndata,nodata,infile,obstype,lunout,gstime,twind,s
   real(r_kind) crit1,timedif,xmesh,pmesh
   real(r_kind),dimension(nsig):: presl
   real(r_kind) uob_1,uob_2,uob_3,uob_4,vob_1,vob_2,vob_3,vob_4
-  real(r_kind) lkcs_1,lkcs_2,lkcs_3,lkcs_4
-  real(r_kind),dimension(4):: lkcs_vec
   real(r_kind),dimension(4):: uob_vec
   real(r_kind),dimension(4):: vob_vec
-  real(r_kind) umd, vmd ! "model" u- and v-wind, from BUFR file
-  real(r_kind) uopp, vopp ! "opposing" u- and v-wind
-  real(r_kind) vdiffopt, vdiffopp ! vector-difference w.r.t. "model"
+  real(r_kind) uob_rng, vob_rng ! "extreme" u- and v-wind ranges
+  real(r_kind) woe_est ! estimated woe value from "extreme" u/v ranges
+  real(r_kind) err_spd, err_dir ! wind speed and direction error
 
   real(r_double),dimension(8):: hdrdat
   real(r_double),dimension(2):: satqc
@@ -167,8 +165,7 @@ subroutine read_hu3ascat(nread,ndata,nodata,infile,obstype,lunout,gstime,twind,s
 
 !******** Modify below from the bufrtable: 
   data hdrtr /'SAID CLATH CLONH YEAR MNTH DAYS HOUR MINU'/ 
-  data obstr/'WVCQ NWVA ISWV MWS10 MWD10'/ 
-  data wndstr/'WS10 WD10 LKCS'/ 
+  data obstr/'DBID EESSM MWS10 MWD10 WVCQ'/  
   
   
   data ithin / -9 /
@@ -400,8 +397,6 @@ write(6,*) ' READ_HU3ASCAT: entering routine'
            ee=r110
            qifn=r110
            qify=r110
-           umd=bmiss
-           vmd=bmiss
            uob_1=bmiss
            vob_1=bmiss
            uob_2=bmiss
@@ -410,15 +405,17 @@ write(6,*) ' READ_HU3ASCAT: entering routine'
            vob_3=bmiss
            uob_4=bmiss
            vob_4=bmiss
-           lkcs_1=bmiss
-           lkcs_2=bmiss
-           lkcs_3=bmiss
-           lkcs_4=bmiss
+           uob_rng=bmiss
+           vob_rng=bmiss
+           woe_est=bmiss
+           err_spd=bmiss
+           err_dir=bmiss
+           qc1=bmiss
  
 ! Extract type, date, and location information
            call ufbint(lunin,hdrdat,8,1,iret,hdrtr) 
            call ufbint(lunin,obsdat,5,1,iret,obstr)
-           call ufbrep(lunin,wnddat,3,4,iret,wndstr)
+           !call ufbrep(lunin,wnddat,3,4,iret,wndstr)
 
 
 !** potential can reject bad cell, etc, place holder for now
@@ -506,21 +503,83 @@ write(6,*) ' READ_HU3ASCAT: entering routine'
                ! we will select one from the available ambiguities
                ! based on assigned likelihood, below
 
-           qc1=obsdat(1) ! WVCQ: wind vector cell quality
-           qc2=obsdat(2) ! NWVA: number of wind vector ambiguities
-           qc3=obsdat(3) ! ISWV: index of selected wind vector
-           ! Convert "model" 10m speed/dir to u-, v-wind
-           umd=-obsdat(4)*sin(obsdat(5)*deg2rad)
-           vmd=-obsdat(4)*cos(obsdat(5)*deg2rad)
-           ! Convert ASCAT ambiguity speed/dir to u-, v-wind
-           uob_1=-wnddat(1,1)*sin(wnddat(2,1)*deg2rad)
-           vob_1=-wnddat(1,1)*cos(wnddat(2,1)*deg2rad)
-           uob_2=-wnddat(1,2)*sin(wnddat(2,2)*deg2rad)
-           vob_2=-wnddat(1,2)*cos(wnddat(2,2)*deg2rad)
-           uob_3=-wnddat(1,3)*sin(wnddat(2,3)*deg2rad)
-           vob_3=-wnddat(1,3)*cos(wnddat(2,3)*deg2rad)
-           uob_4=-wnddat(1,4)*sin(wnddat(2,4)*deg2rad)
-           vob_4=-wnddat(1,4)*cos(wnddat(2,4)*deg2rad)
+           err_spd=obsdat(1) ! DBID: contains wind direction error (deg)
+           err_dir=obsdat(2) ! EESM: contains wind speed error (m/s)
+           ! Convert "optimal" 10m speed/dir to u-, v-wind
+           uob=-obsdat(3)*sin(obsdat(4)*deg2rad)
+           vob=-obsdat(3)*cos(obsdat(4)*deg2rad)
+           ! Pull quality-flag
+           qc1=obsdat(5)
+           ! Ob errors are provided in speed/direction space. To model these
+           ! errors in u/v component space, we will use the following logic:
+           ! 1. Assume the wind speed is a uniform distribution between
+           !    MWS10-0.5*err_spd and MWS10+0.5*err_spd
+           ! 2. Assume the wind direction is a uniform distribution between
+           !    MWD10-0.5*err_dir and MWD10+0.5*err_dir
+           ! 3. Therefore, we can use trigonometric identities:
+           !     3a. sin(a +- b) = sin(a)cos(b) +- cos(a)sin(b)
+           !     3b. cos(a +- b) = cos(a)cos(b) -+ sin(a)sin(b)
+           !    To define the range of u/v components by four possible values
+           !    based on the error bounds as:
+           ! 4. uob_1 = -(obsdat(3)+0.5*err_spd)*(
+           !                                      sin(obsdat(4)*deg2rad)*cos(err_dir*deg2rad)+ 
+           !                                      cos(obsdat(4)*deg2rad)*sin(err_dir*deg2rad)
+           !                                     )
+           !    uob_2 = -(obsdat(3)+0.5*err_spd)*(
+           !                                      sin(obsdat(4)*deg2rad)*cos(err_dir*deg2rad)-
+           !                                      cos(obsdat(4)*deg2rad)*sin(err_dir*deg2rad)
+           !                                     )
+           !    uob_3 = -(obsdat(3)-0.5*err_spd)*(
+           !                                      sin(obsdat(4)*deg2rad)*cos(err_dir*deg2rad)+
+           !                                      cos(obsdat(4)*deg2rad)*sin(err_dir*deg2rad)
+           !                                     )
+           !    uob_4 = -(obsdat(3)-0.5*err_spd)*(
+           !                                      sin(obsdat(4)*deg2rad)*cos(err_dir*deg2rad)-
+           !                                      cos(obsdat(4)*deg2rad)*sin(err_dir*deg2rad)
+           !                                     )                                      
+           !    vob_1 = -(obsdat(3)+0.5*err_spd)*(
+           !                                      cos(obsdat(4)*deg2rad)*cos(err_dir*deg2rad)- 
+           !                                      sin(obsdat(4)*deg2rad)*sin(err_dir*deg2rad)
+           !                                     )
+           !    vob_2 = -(obsdat(3)+0.5*err_spd)*(
+           !                                      cos(obsdat(4)*deg2rad)*cos(err_dir*deg2rad)+
+           !                                      sin(obsdat(4)*deg2rad)*sin(err_dir*deg2rad)
+           !                                     )
+           !    vob_3 = -(obsdat(3)-0.5*err_spd)*(
+           !                                      cos(obsdat(4)*deg2rad)*cos(err_dir*deg2rad)-
+           !                                      sin(obsdat(4)*deg2rad)*sin(err_dir*deg2rad)
+           !                                     )
+           !    vob_4 = -(obsdat(3)-0.5*err_spd)*(
+           !                                      cos(obsdat(4)*deg2rad)*cos(err_dir*deg2rad)+
+           !                                      sin(obsdat(4)*deg2rad)*sin(err_dir*deg2rad)
+           !                                     )
+           ! 5. The error-bounds on u and v are then computed as:
+           !    uob_err = 0.5*(
+           !                   max(uob_1,uob_2,uob_3,uob_4)-
+           !                   min(uob_1,uob_2,uob_3,uob_4)
+           !                  )
+           !    vob_err = 0.5*(
+           !                   max(vob_1,vob_2,vob_3,vob_4)-
+           !                   min(vob_1,vob_2,vob_3,vob_4)
+           !                  )
+           !    This presupposes that the range of possible u/v values given the
+           !    speed/direction errors is centered on the observed u/v, which is
+           !    NOT necessarily a good assumption, but it's usually very close.
+           ! 6. Since woe is taken as a single value to express error in either
+           !    the u- or v-component, we calculate woe as a simple average of
+           !    uob_err and vob_error: woe = 0.5*(uob_err+vob_err)
+           ! 7. If either spd_err or dir_err is zero, then insufficient
+           !    information is provided for this calculation and woe will revert to
+           !    the error table.
+           ! Compute 4 potential extremes for u,v
+           uob_1=-(obsdat(3)+0.5*err_spd)*(sin(obsdat(4)*deg2rad)*cos(err_dir*deg2rad)+cos(obsdat(4)*deg2rad)*sin(err_dir*deg2rad))
+           uob_2=-(obsdat(3)+0.5*err_spd)*(sin(obsdat(4)*deg2rad)*cos(err_dir*deg2rad)-cos(obsdat(4)*deg2rad)*sin(err_dir*deg2rad))
+           uob_3=-(obsdat(3)-0.5*err_spd)*(sin(obsdat(4)*deg2rad)*cos(err_dir*deg2rad)+cos(obsdat(4)*deg2rad)*sin(err_dir*deg2rad))
+           uob_4=-(obsdat(3)-0.5*err_spd)*(sin(obsdat(4)*deg2rad)*cos(err_dir*deg2rad)-cos(obsdat(4)*deg2rad)*sin(err_dir*deg2rad))
+           vob_1=-(obsdat(3)+0.5*err_spd)*(cos(obsdat(4)*deg2rad)*cos(err_dir*deg2rad)-sin(obsdat(4)*deg2rad)*sin(err_dir*deg2rad))
+           vob_2=-(obsdat(3)+0.5*err_spd)*(cos(obsdat(4)*deg2rad)*cos(err_dir*deg2rad)+sin(obsdat(4)*deg2rad)*sin(err_dir*deg2rad))
+           vob_3=-(obsdat(3)-0.5*err_spd)*(cos(obsdat(4)*deg2rad)*cos(err_dir*deg2rad)-sin(obsdat(4)*deg2rad)*sin(err_dir*deg2rad))
+           vob_4=-(obsdat(3)-0.5*err_spd)*(cos(obsdat(4)*deg2rad)*cos(err_dir*deg2rad)+sin(obsdat(4)*deg2rad)*sin(err_dir*deg2rad))
            ! load uob, vob values into vectors
            uob_vec(1)=uob_1
            uob_vec(2)=uob_2
@@ -530,49 +589,14 @@ write(6,*) ' READ_HU3ASCAT: entering routine'
            vob_vec(2)=vob_2
            vob_vec(3)=vob_3
            vob_vec(4)=vob_4
-           ! load likelihood values into variables
-           lkcs_1=wnddat(3,1)
-           lkcs_2=wnddat(3,2)
-           lkcs_3=wnddat(3,3)
-           lkcs_4=wnddat(3,4)
-           ! missing-value lkcs will be represented by a very large number
-           ! (>>r110): Reverse the sign of these members so they are not
-           ! selected by maxloc() as the optimal wind vector
-           if(lkcs_1 > r110) lkcs_1 = -lkcs_1
-           if(lkcs_2 > r110) lkcs_2 = -lkcs_2
-           if(lkcs_3 > r110) lkcs_3 = -lkcs_3
-           if(lkcs_4 > r110) lkcs_4 = -lkcs_4
-           ! load LKCS values into vector
-           lkcs_vec(1)=lkcs_1
-           lkcs_vec(2)=lkcs_2
-           lkcs_vec(3)=lkcs_3
-           lkcs_vec(4)=lkcs_4
-           ! select optimal wind vector based on maxloc(lkcs_vec)
-           opt_idx=maxloc(lkcs_vec)
-           ! ambiguity check: If a wind pointed opposite to the optimal
-           ! wind would be a better fit to the model wind, we should
-           ! anticipate that there is another wind ambiguity that may
-           ! have a marginally lower likelihood but points in the right
-           ! direction and should be selected as the optimal wind.
-           uopp=-uob_vec(opt_idx(1)) ! opposing u-wind
-           vopp=-vob_vec(opt_idx(1)) ! opposing v-wind
-           vdiffopt=sqrt((uob_vec(opt_idx(1))-umd)**2.+(vob_vec(opt_idx(1))-vmd)**2.)
-           vdiffopp=sqrt((uopp-umd)**2.+(vopp-vmd)**2.)
-           if (vdiffopp<vdiffopt) then ! ambiguity check-fail
-               ! set likelihood of optimal to -bmiss
-               lkcs_vec(opt_idx(1)) = -bmiss
-               ! find next most likely wind ambiguity and set as optimal
-               opt_idx=maxloc(lkcs_vec)
-           end if
-           ! insert wind speed threshold criteria from above
-           if(abs(wnddat(1,opt_idx(1))) >= r100) cycle loop_readsb
-           ! reject any optimal wind vector with likelihood
-           ! less than -110 (e.g. obviously a missing-value)
-           if(lkcs_vec(opt_idx(1))<-r110) cycle loop_readsb
-           ! define wind vector from optimal wnddat index
-           uob=uob_vec(opt_idx(1))
-           vob=vob_vec(opt_idx(1))
-           write(6,*) 'BTH: selected wind uob,vob,lkcs=',uob,vob,lkcs_vec(opt_idx(1))           
+           ! compute uob_rng and vob_rng based on min/max values in uob_vec,
+           ! vob_vec
+           uob_rng=maxval(uob_vec)-minval(uob_vec)
+           vob_rng=maxval(vob_vec)-minval(vob_vec)
+           ! compute estimated woe value based no half of the average of uob_rng
+           ! and vob_rng
+           woe_est=0.25*(uob_rng+vob_rng)
+           write(6,*) 'BTH: selected wind uob,vob,woe_est=',uob,vob,woe_est           
 !!  Get observation error from PREPBUFR observation error table
 !   only need read the 4th column for type 290 from the right
  
@@ -707,8 +731,13 @@ write(6,*) ' READ_HU3ASCAT: entering routine'
               iout=ndata
               isort(ntb)=iout
            endif
-
-           woe=obserr
+           ! if woe_est is non-zero and non-bmiss, use it for woe in place of
+           ! obserr, otherwise use obserr
+           if(woe_est > 0. .and. woe_est < r110)then 
+              woe=woe_est
+           else
+              woe=obserr
+           endif
            oelev=r10
 
            if(regional .and. .not. fv3_regional)then
