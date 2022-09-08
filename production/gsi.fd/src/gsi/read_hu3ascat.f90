@@ -149,11 +149,11 @@ subroutine read_hu3ascat(nread,ndata,nodata,infile,obstype,lunout,gstime,twind,s
   real(r_kind) uob_rng, vob_rng ! "extreme" u- and v-wind ranges
   real(r_kind) woe_est ! estimated woe value from "extreme" u/v ranges
   real(r_kind) err_spd, err_dir ! wind speed and direction error
+  integer(i_kind) isflg_skip, tsavg_skip, wvcq_skip ! counters for filtering
 
   real(r_double),dimension(8):: hdrdat
   real(r_double),dimension(2):: satqc
   real(r_double),dimension(5):: obsdat
-  real(r_double),dimension(3,4):: wnddat
   real(r_double),dimension(1,1):: r_prvstg,r_sprvstg
   real(r_kind),allocatable,dimension(:):: presl_thin
   real(r_kind),allocatable,dimension(:,:):: cdata_all,cdata_out
@@ -317,6 +317,9 @@ write(6,*) ' READ_HU3ASCAT: entering routine'
   nchanl=0
   ilon=2
   ilat=3
+  isflg_skip = 0
+  tsavg_skip = 0
+  wvcq_skip = 0
 
 !!  read satellite winds one type a time
 !   same as in the read_prepbufr.f90 file
@@ -383,7 +386,6 @@ write(6,*) ' READ_HU3ASCAT: entering routine'
 
            hdrdat=bmiss
            obsdat=bmiss
-           wnddat=bmiss
            satqc=bmiss
            iobsub=6
            itype=-1
@@ -415,7 +417,6 @@ write(6,*) ' READ_HU3ASCAT: entering routine'
 ! Extract type, date, and location information
            call ufbint(lunin,hdrdat,8,1,iret,hdrtr) 
            call ufbint(lunin,obsdat,5,1,iret,obstr)
-           !call ufbrep(lunin,wnddat,3,4,iret,wndstr)
 
 
 !** potential can reject bad cell, etc, place holder for now
@@ -448,10 +449,13 @@ write(6,*) ' READ_HU3ASCAT: entering routine'
            if(hdrdat(3) <zero) hdrdat(3)=hdrdat(3)+r360
            if(hdrdat(3) == r360) hdrdat(3)=hdrdat(3)-r360
            if(hdrdat(3) >r360) cycle loop_readsb 
-           !if(abs(obsdat(2)) >= 100) cycle loop_readsb
-             ! applied to wind direction, move to lower bloc
-             ! when optimal wind vector has been selected
-           if(obsdat(1) >=1) cycle loop_readsb
+           ! Wind speed sanity test rejection
+           if(abs(obsdat(3)) >= 100) cycle loop_readsb
+           ! WVCQ flag rejection for all non-zero values
+           !if(obsdat(5) >=1) then
+           !    wvcq_skip = wvcq_skip + 1
+           !    cycle loop_readsb   ! Temporarily shut off
+           !endif
 
            if(trim(subset) == 'NC012122') then    ! HU3ASCAT wind
               if( hdrdat(1) < r6) then          
@@ -484,17 +488,6 @@ write(6,*) ' READ_HU3ASCAT: entering routine'
               call grdcrd1(dlat,rlats,nlat,1)
               call grdcrd1(dlon,rlons,nlon,1)
            endif
-
-!     If ASCAT data, determine primary surface type.  If not open sea,
-!     skip this observation.  This check must be done before thinning.
-!     isflg    - surface flag 0:sea 1:land 2:sea ice 3:snow 4:mixed
-
-           if (itype==290) then                              
-              call deter_sfc_type(dlat_earth,dlon_earth,t4dv,isflg,tsavg)
-              if (isflg /= 0) cycle loop_readsb
-              if (tsavg <= 273.0_r_kind) cycle loop_readsb
-           endif
-
        
 !!    convert from wind direction and speed to u,v component
            !uob=-obsdat(2)*sin(obsdat(1)*deg2rad)
@@ -503,13 +496,28 @@ write(6,*) ' READ_HU3ASCAT: entering routine'
                ! we will select one from the available ambiguities
                ! based on assigned likelihood, below
 
-           err_spd=obsdat(1) ! DBID: contains wind direction error (deg)
-           err_dir=obsdat(2) ! EESM: contains wind speed error (m/s)
+           err_dir=obsdat(1) ! DBID: contains wind direction error (deg)
+           err_spd=obsdat(2) ! EESM: contains wind speed error (m/s)
            ! Convert "optimal" 10m speed/dir to u-, v-wind
            uob=-obsdat(3)*sin(obsdat(4)*deg2rad)
            vob=-obsdat(3)*cos(obsdat(4)*deg2rad)
            ! Pull quality-flag
            qc1=obsdat(5)
+           !     If ASCAT data, determine primary surface type.  If not open
+           !     sea,
+           !     skip this observation.  This check must be done before thinning.
+           !     isflg    - surface flag 0:sea 1:land 2:sea ice 3:snow 4:mixed
+           if (itype==290) then
+              call deter_sfc_type(dlat_earth,dlon_earth,t4dv,isflg,tsavg)
+              if (isflg /= 0) then
+                  isflg_skip=isflg_skip+1
+                  cycle loop_readsb
+              endif
+              if (tsavg <= 273.0_r_kind) then
+                  tsavg_skip=tsavg_skip+1
+                  cycle loop_readsb
+              endif
+           endif
            ! Ob errors are provided in speed/direction space. To model these
            ! errors in u/v component space, we will use the following logic:
            ! 1. Assume the wind speed is a uniform distribution between
@@ -522,28 +530,28 @@ write(6,*) ' READ_HU3ASCAT: entering routine'
            !    To define the range of u/v components by four possible values
            !    based on the error bounds as:
            ! 4. uob_1 = -(obsdat(3)+0.5*err_spd)*(
-           !                                      sin(obsdat(4)*deg2rad)*cos(err_dir*deg2rad)+ 
-           !                                      cos(obsdat(4)*deg2rad)*sin(err_dir*deg2rad)
+           !                                      sin(obsdat(4)*deg2rad)*cos(0.5*err_dir*deg2rad)+ 
+           !                                      cos(obsdat(4)*deg2rad)*sin(0.5*err_dir*deg2rad)
            !                                     )
            !    uob_2 = -(obsdat(3)+0.5*err_spd)*(
-           !                                      sin(obsdat(4)*deg2rad)*cos(err_dir*deg2rad)-
-           !                                      cos(obsdat(4)*deg2rad)*sin(err_dir*deg2rad)
+           !                                      sin(obsdat(4)*deg2rad)*cos(0.5*err_dir*deg2rad)-
+           !                                      cos(obsdat(4)*deg2rad)*sin(0.5*err_dir*deg2rad)
            !                                     )
            !    uob_3 = -(obsdat(3)-0.5*err_spd)*(
-           !                                      sin(obsdat(4)*deg2rad)*cos(err_dir*deg2rad)+
-           !                                      cos(obsdat(4)*deg2rad)*sin(err_dir*deg2rad)
+           !                                      sin(obsdat(4)*deg2rad)*cos(0.5*err_dir*deg2rad)+
+           !                                      cos(obsdat(4)*deg2rad)*sin(0.5*err_dir*deg2rad)
            !                                     )
            !    uob_4 = -(obsdat(3)-0.5*err_spd)*(
-           !                                      sin(obsdat(4)*deg2rad)*cos(err_dir*deg2rad)-
-           !                                      cos(obsdat(4)*deg2rad)*sin(err_dir*deg2rad)
+           !                                      sin(obsdat(4)*deg2rad)*cos(0.5*err_dir*deg2rad)-
+           !                                      cos(obsdat(4)*deg2rad)*sin(0.5*err_dir*deg2rad)
            !                                     )                                      
            !    vob_1 = -(obsdat(3)+0.5*err_spd)*(
-           !                                      cos(obsdat(4)*deg2rad)*cos(err_dir*deg2rad)- 
-           !                                      sin(obsdat(4)*deg2rad)*sin(err_dir*deg2rad)
+           !                                      cos(obsdat(4)*deg2rad)*cos(0.5*err_dir*deg2rad)- 
+           !                                      sin(obsdat(4)*deg2rad)*sin(0.5*err_dir*deg2rad)
            !                                     )
            !    vob_2 = -(obsdat(3)+0.5*err_spd)*(
-           !                                      cos(obsdat(4)*deg2rad)*cos(err_dir*deg2rad)+
-           !                                      sin(obsdat(4)*deg2rad)*sin(err_dir*deg2rad)
+           !                                      cos(obsdat(4)*deg2rad)*cos(0.5*err_dir*deg2rad)+
+           !                                      sin(obsdat(4)*deg2rad)*sin(0.5*err_dir*deg2rad)
            !                                     )
            !    vob_3 = -(obsdat(3)-0.5*err_spd)*(
            !                                      cos(obsdat(4)*deg2rad)*cos(err_dir*deg2rad)-
@@ -572,14 +580,14 @@ write(6,*) ' READ_HU3ASCAT: entering routine'
            !    information is provided for this calculation and woe will revert to
            !    the error table.
            ! Compute 4 potential extremes for u,v
-           uob_1=-(obsdat(3)+0.5*err_spd)*(sin(obsdat(4)*deg2rad)*cos(err_dir*deg2rad)+cos(obsdat(4)*deg2rad)*sin(err_dir*deg2rad))
-           uob_2=-(obsdat(3)+0.5*err_spd)*(sin(obsdat(4)*deg2rad)*cos(err_dir*deg2rad)-cos(obsdat(4)*deg2rad)*sin(err_dir*deg2rad))
-           uob_3=-(obsdat(3)-0.5*err_spd)*(sin(obsdat(4)*deg2rad)*cos(err_dir*deg2rad)+cos(obsdat(4)*deg2rad)*sin(err_dir*deg2rad))
-           uob_4=-(obsdat(3)-0.5*err_spd)*(sin(obsdat(4)*deg2rad)*cos(err_dir*deg2rad)-cos(obsdat(4)*deg2rad)*sin(err_dir*deg2rad))
-           vob_1=-(obsdat(3)+0.5*err_spd)*(cos(obsdat(4)*deg2rad)*cos(err_dir*deg2rad)-sin(obsdat(4)*deg2rad)*sin(err_dir*deg2rad))
-           vob_2=-(obsdat(3)+0.5*err_spd)*(cos(obsdat(4)*deg2rad)*cos(err_dir*deg2rad)+sin(obsdat(4)*deg2rad)*sin(err_dir*deg2rad))
-           vob_3=-(obsdat(3)-0.5*err_spd)*(cos(obsdat(4)*deg2rad)*cos(err_dir*deg2rad)-sin(obsdat(4)*deg2rad)*sin(err_dir*deg2rad))
-           vob_4=-(obsdat(3)-0.5*err_spd)*(cos(obsdat(4)*deg2rad)*cos(err_dir*deg2rad)+sin(obsdat(4)*deg2rad)*sin(err_dir*deg2rad))
+           uob_1=-(obsdat(3)+0.5*err_spd)*(sin(obsdat(4)*deg2rad)*cos(0.5*err_dir*deg2rad)+cos(obsdat(4)*deg2rad)*sin(0.5*err_dir*deg2rad))
+           uob_2=-(obsdat(3)+0.5*err_spd)*(sin(obsdat(4)*deg2rad)*cos(0.5*err_dir*deg2rad)-cos(obsdat(4)*deg2rad)*sin(0.5*err_dir*deg2rad))
+           uob_3=-(obsdat(3)-0.5*err_spd)*(sin(obsdat(4)*deg2rad)*cos(0.5*err_dir*deg2rad)+cos(obsdat(4)*deg2rad)*sin(0.5*err_dir*deg2rad))
+           uob_4=-(obsdat(3)-0.5*err_spd)*(sin(obsdat(4)*deg2rad)*cos(0.5*err_dir*deg2rad)-cos(obsdat(4)*deg2rad)*sin(0.5*err_dir*deg2rad))
+           vob_1=-(obsdat(3)+0.5*err_spd)*(cos(obsdat(4)*deg2rad)*cos(0.5*err_dir*deg2rad)-sin(obsdat(4)*deg2rad)*sin(0.5*err_dir*deg2rad))
+           vob_2=-(obsdat(3)+0.5*err_spd)*(cos(obsdat(4)*deg2rad)*cos(0.5*err_dir*deg2rad)+sin(obsdat(4)*deg2rad)*sin(0.5*err_dir*deg2rad))
+           vob_3=-(obsdat(3)-0.5*err_spd)*(cos(obsdat(4)*deg2rad)*cos(0.5*err_dir*deg2rad)-sin(obsdat(4)*deg2rad)*sin(0.5*err_dir*deg2rad))
+           vob_4=-(obsdat(3)-0.5*err_spd)*(cos(obsdat(4)*deg2rad)*cos(0.5*err_dir*deg2rad)+sin(obsdat(4)*deg2rad)*sin(0.5*err_dir*deg2rad))
            ! load uob, vob values into vectors
            uob_vec(1)=uob_1
            uob_vec(2)=uob_2
@@ -596,7 +604,7 @@ write(6,*) ' READ_HU3ASCAT: entering routine'
            ! compute estimated woe value based no half of the average of uob_rng
            ! and vob_rng
            woe_est=0.25*(uob_rng+vob_rng)
-           write(6,*) 'BTH: selected wind uob,vob,woe_est=',uob,vob,woe_est           
+           write(6,*) 'BTH: selected wind uob,vob,spd,dir,errspd,errdir,uob_rng,vob_rng,woe_est=',uob,vob,obsdat(3),obsdat(4),err_spd,err_dir,uob_rng,vob_rng,woe_est           
 !!  Get observation error from PREPBUFR observation error table
 !   only need read the 4th column for type 290 from the right
  
@@ -767,7 +775,11 @@ write(6,*) ' READ_HU3ASCAT: entering routine'
            cdata_all(10,iout)=nc                  ! index of type in convinfo file
            cdata_all(11,iout)=0                   ! index of station elevation
            cdata_all(12,iout)=qc1                 ! index of quality mark
-           cdata_all(13,iout)=obserr              ! original obs error
+           ! BTH: replacing cdata_all(13,iout) with woe instead of obserr
+           !      to suppress setupw QC when input and adjust error are
+           !      different, just assuming our woe estimate is also our
+           !      input obserr value for now.
+           cdata_all(13,iout)=woe                 ! original obs error
            cdata_all(14,iout)=usage               ! usage parameter
            cdata_all(15,iout)=idomsfc             ! dominate surface type
            cdata_all(16,iout)=tsavg               ! skin temperature
@@ -837,7 +849,7 @@ write(6,*) ' READ_HU3ASCAT: entering routine'
   endif
   
   write(6,*) 'READ_HU3ASCAT,nread,ndata,nreal,nodata=',nread,ndata,nreal,nodata
-
+  write(6,*) 'BTH: isflg_skip,tsavg_skip,wvcq_skip=',isflg_skip,tsavg_skip,wvcq_skip
   close(lunin)
 
 ! End of routine
