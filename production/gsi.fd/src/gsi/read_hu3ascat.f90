@@ -181,7 +181,9 @@ write(6,*) ' READ_HU3ASCAT: entering routine'
 ! nreal keep the dimension of cdata_all 
   werrmin=one
   nsattype=0
-  nreal=24
+  ! BTH: Expand nreal from 24 to 26, for compliance with necessary features of
+  ! setupw.f90
+  nreal=26 ! BTH: was 24
   if (noiqc) then
      lim_qm=8
   else
@@ -451,7 +453,17 @@ write(6,*) ' READ_HU3ASCAT: entering routine'
            if(hdrdat(3) >r360) cycle loop_readsb 
            ! Wind speed sanity test rejection
            if(abs(obsdat(3)) >= 100) cycle loop_readsb
+           ! Also going to reject zero-speed obs. I see
+           ! no zero-speed obs accepted in conventional
+           ! ASCAT winds, going to replicate that with
+           ! with a filter here.
+           if(obsdat(3) == 0) cycle loop_readsb
            ! WVCQ flag rejection for all non-zero values
+           ! This is being shut off, I don't believe that
+           ! whatever is in WVCQ represents a quality-mark
+           ! anymore. Not sure what it is, but when I filter
+           ! obsdat(5) ~= 0 it removes most of the interior
+           ! of the swaths, leaving only the edges.
            !if(obsdat(5) >=1) then
            !    wvcq_skip = wvcq_skip + 1
            !    cycle loop_readsb   ! Temporarily shut off
@@ -502,7 +514,12 @@ write(6,*) ' READ_HU3ASCAT: entering routine'
            uob=-obsdat(3)*sin(obsdat(4)*deg2rad)
            vob=-obsdat(3)*cos(obsdat(4)*deg2rad)
            ! Pull quality-flag
-           qc1=obsdat(5)
+           ! This was being pulled from WCVQ, but I am no longer certain
+           ! that the data stored here represents a quality marker. I will
+           ! default to a value of 2 for the quality-flag, which appear to
+           ! be the only quality-flag in conventional ASCAT (potentially a
+           ! hard-wired value at the code-level in GSI)
+           qc1=2
            !     If ASCAT data, determine primary surface type.  If not open
            !     sea,
            !     skip this observation.  This check must be done before thinning.
@@ -604,7 +621,16 @@ write(6,*) ' READ_HU3ASCAT: entering routine'
            ! compute estimated woe value based no half of the average of uob_rng
            ! and vob_rng
            woe_est=0.25*(uob_rng+vob_rng)
-           write(6,*) 'BTH: selected wind uob,vob,spd,dir,errspd,errdir,uob_rng,vob_rng,woe_est=',uob,vob,obsdat(3),obsdat(4),err_spd,err_dir,uob_rng,vob_rng,woe_est           
+           ! filter out any observations with woe_est > 20 m/s (sanity check)
+           if (woe_est>20.) then
+               write(6,*) 'BTH: rej woe_est=',woe_est
+               cycle loop_readsb
+           endif
+           ! obs past this point have been selected for cdata_all, setupw.f90
+           write(6,*) 'BTH: acc woe_est=',woe_est           
+           ! the actual woe value will be either woe_est or the minimum error
+           ! specified in the global_convinfo.txt file, whichever is larger
+
 !!  Get observation error from PREPBUFR observation error table
 !   only need read the 4th column for type 290 from the right
  
@@ -739,9 +765,9 @@ write(6,*) ' READ_HU3ASCAT: entering routine'
               iout=ndata
               isort(ntb)=iout
            endif
-           ! if woe_est is non-zero and non-bmiss, use it for woe in place of
+           ! if woe_est is greater than obserr, use it for woe in place of
            ! obserr, otherwise use obserr
-           if(woe_est > 0. .and. woe_est < r110)then 
+           if(woe_est > obserr)then 
               woe=woe_est
            else
               woe=obserr
@@ -790,8 +816,22 @@ write(6,*) ' READ_HU3ASCAT: entering routine'
            cdata_all(21,iout)=zz                  ! terrain height at ob location
            cdata_all(22,iout)=r_prvstg(1,1)       ! provider name
            cdata_all(23,iout)=r_sprvstg(1,1)      ! subprovider name
-           cdata_all(24,iout)=var_jb              ! non linear qc parameter
-
+           !cdata_all(24,iout)=var_jb              ! non linear qc parameter
+           ! BTH: there are additional cdata_all slots accessed by setupw.f90,
+           ! probably caused by setupw.f90 upgrades over the years while this
+           ! modified OSCAT read routine has been shelved since 2011-ish. I need
+           ! to include a Hilbert curve weight in cdata_all(26,iout), the
+           ! appropriate value appears to be 1.0 based on how this is set in
+           ! read_prepbufr.f90. In addition, the non linear qc parameter has
+           ! been moved from cdata_all(24,iout) to cdata_all(25,iout), with
+           ! cdata_all(24,iout) now for a data level category variable. Looking
+           ! at the BUFR code table:
+           ! https://www.nco.ncep.noaa.gov/sib/jeff/CodeFlag_0_STDv31_LOC7.html
+           ! this variable comes from (0-08-193 - CAT) "PrepBUFR Data Level
+           ! Category", and should probably be set to 63 (Missing Value).
+           cdata_all(24,iout)=63                  ! data level category (63=miss)
+           cdata_all(25,iout)=var_jb              ! non linear qc parameter
+           cdata_all(26,iout)=1.0                 ! Hilbert curve weight (=1)
         enddo  loop_readsb
 
      enddo loop_msg
