@@ -149,7 +149,7 @@ subroutine read_hu3ascat(nread,ndata,nodata,infile,obstype,lunout,gstime,twind,s
   real(r_kind) uob_rng, vob_rng ! "extreme" u- and v-wind ranges
   real(r_kind) woe_est ! estimated woe value from "extreme" u/v ranges
   real(r_kind) err_spd, err_dir ! wind speed and direction error
-  integer(i_kind) isflg_skip, tsavg_skip, wvcq_skip ! counters for filtering
+  integer(i_kind) isflg_skip, tsavg_skip, wvcq_skip, pres_skip ! counters for filtering
 
   real(r_double),dimension(8):: hdrdat
   real(r_double),dimension(2):: satqc
@@ -322,6 +322,7 @@ write(6,*) ' READ_HU3ASCAT: entering routine'
   isflg_skip = 0
   tsavg_skip = 0
   wvcq_skip = 0
+  pres_skip = 0
 
 !!  read satellite winds one type a time
 !   same as in the read_prepbufr.f90 file
@@ -725,7 +726,6 @@ write(6,*) ' READ_HU3ASCAT: entering routine'
                            w11*prsl_full(klatp1,klonp1,kk)
               end do
            end if
-
 ! The following two lines are new in SATWND:
            dlnpob=log(one_tenth*ppb)  ! ln(pressure in cb)
            ppb=one_tenth*ppb         ! from mb to cb
@@ -889,7 +889,7 @@ write(6,*) ' READ_HU3ASCAT: entering routine'
   endif
   
   write(6,*) 'READ_HU3ASCAT,nread,ndata,nreal,nodata=',nread,ndata,nreal,nodata
-  write(6,*) 'BTH: isflg_skip,tsavg_skip,wvcq_skip=',isflg_skip,tsavg_skip,wvcq_skip
+  write(6,*) 'BTH: isflg_skip,tsavg_skip,wvcq_skip,pres_skip=',isflg_skip,tsavg_skip,wvcq_skip,pres_skip
   close(lunin)
 
 ! End of routine

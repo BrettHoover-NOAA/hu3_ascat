@@ -4,10 +4,11 @@ Repositories:
 This repository contains the code-changes necessary to read the HU3-ASCAT BUFR file, select
 an optimal wind from the available ambiguities (if present), and send appropriate data to
 cdata_all for further processing in setupw with HU3-ASCAT winds defined as Type=290 and
-Subtype=6 as a monitored wind:
+Subtype=6 as an assimilated wind:
 
 read_obs --> read_hu3ascat --> setupw
 * Requires hard-wiring the global_convinfo.txt file found in production/fix/in config.anal
+* Requires extra qc in setupw.f90 to reject HU3ASCAT winds with pre < 950. hPa
 
 ./lkcs_diag
 This repository achieves the monitoring of HU3-ASCAT winds that is achieved in ./production,
